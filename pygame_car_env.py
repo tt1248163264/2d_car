@@ -6,6 +6,7 @@ TODO:
     3.  最终的局部观测图片似乎有一定的抖动现象（随小车朝向的变化）
     4.  各自目标点的设计
     5. 局部观测图片中的目标点
+暂时不把局部路径规划的目标点放在图片输入中
 '''
 
 import numpy as np
@@ -41,6 +42,7 @@ class CarEnv(object):
     n_obs = len(IMAGES['obs'])#not the number of the obs!!!
     n_agent = 1
     hard_level = 1
+    image_shape = [160,160,3]
     def __init__(self):
         screen.fill(background)
         self._gen_random_obs()
