@@ -10,6 +10,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from pygame_car_env import CarEnv
 from tensorflow.contrib import slim
+from dwa_planer import *
 
 OUTPUT_GRAPH = True
 LOG_DIR = './log'
@@ -170,10 +171,10 @@ class ACNet(object):
         return liner_prob, angular_prob, liner_v, angular_v, a_params, c_params
 
     def update_global(self, feed_dict):  # run by a local
-        SESS.run([self.update_a_op, self.update_c_op], feed_dict)  # local grads applies to global net
+        sess.run([self.update_a_op, self.update_c_op], feed_dict)  # local grads applies to global net
 
     def pull_global(self):  # run by a local
-        SESS.run([self.pull_a_params_op, self.pull_c_params_op])
+        sess.run([self.pull_a_params_op, self.pull_c_params_op])
 
     def choose_action(self, car_state, last_action, image):  # run by a local
         '''
@@ -186,10 +187,15 @@ class ACNet(object):
         param dwa:[state,vel,goal,obs]
         param net:[state(liner,angular), image]
         '''
-        prob_weights = SESS.run(self.a_prob, feed_dict={self.s: s[np.newaxis, :]})
-        action = np.random.choice(range(prob_weights.shape[1]),
-                                  p=prob_weights.ravel())  # select action w.r.t the actions prob
-        return action
+        
+        if np.random.uniform() <= 0.9:
+            liner_p, angular_p = sess.run(self.liner_prob, self.angular_prob, 
+                                    feed_dict={self.image_input: image[np.newaxis, :], self.state_input:last_action[np.newaxis,:]})
+            liner = np.argmax(liner_p)
+            angular = np.argmax(angular_p)
+            action = [liner, angular]
+        else:#local planer
+            pass
 
 
 class Worker(object):
