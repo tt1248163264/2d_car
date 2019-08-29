@@ -168,13 +168,14 @@ def test():
     独立测试与环境之间的接口用
     '''
     env = CarEnv()
-    state, goal = env.agents[0].reset()
+    agent = env.agents[0]
+    state, goal = agent.reset()
     obs = env.obs_info
     vel = np.array([state[3],state[4]])
     trajectory = np.array(state)
     for i in range(1000):
         vel, best_trajectory = dwa_control(state, vel, goal, obs)
-        state = env.agents[0].step(vel)#修改step函数，以适应dwa的连续动作输入
+        state = agent.step(vel)#修改step函数，以适应dwa的连续动作输入
         trajectory = np.vstack((trajectory ,state))
 
         if math.sqrt((state[0]-goal[0])**2 + (state[1]-goal[1])**2) <= state[5]:

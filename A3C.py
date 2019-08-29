@@ -9,7 +9,7 @@ import tensorflow as tf
 import numpy as np
 import matplotlib.pyplot as plt
 from pygame_car_env import CarEnv
-
+from tensorflow.contrib import slim
 
 OUTPUT_GRAPH = True
 LOG_DIR = './log'
@@ -51,18 +51,23 @@ class ACNet(object):
                 self.a_his = tf.placeholder(tf.int32, [None, ], 'A_his')
                 self.v_target = tf.placeholder(tf.float32, [None, 1], 'Vtarget')
 
-                self.a_prob, self.v, self.a_params, self.c_params = self._build_net(scope)
-
+                self.liner_prob, self.angular_prob, self.liner_v, self.angular_v, self.a_params, self.c_params = self._build_net(scope)
+                # 可能需要影响因子来控制线速度、角速度的优先性
+                self.v = tf.add(self.liner_v, self.angular_v, name='V')
                 td = tf.subtract(self.v_target, self.v, name='TD_error')
                 with tf.name_scope('c_loss'):
                     self.c_loss = tf.reduce_mean(tf.square(td))
 
                 with tf.name_scope('a_loss'):
-                    log_prob = tf.reduce_sum(tf.log(self.a_prob + 1e-5) * tf.one_hot(self.a_his, N_A, dtype=tf.float32), axis=1, keep_dims=True)
-                    exp_v = log_prob * tf.stop_gradient(td)
-                    entropy = -tf.reduce_sum(self.a_prob * tf.log(self.a_prob + 1e-5),
-                                             axis=1, keep_dims=True)  # encourage exploration
-                    self.exp_v = ENTROPY_BETA * entropy + exp_v
+                    liner_log_prob = tf.reduce_sum(tf.log(self.liner_prob + 1e-5) * tf.one_hot(self.a_his[0], n_liner, dtype=tf.float32), axis=1, keep_dims=True)
+                    angular_log_prob = tf.reduce_sum(tf.log(self.angular_prob + 1e-5) * tf.one_hot(self.a_his[1], n_liner, dtype=tf.float32), axis=1, keep_dims=True)
+                    exp_liner_v = liner_log_prob * tf.stop_gradient(td)
+                    exp_angular_v = angular_log_prob * tf.stop_gradient(td)
+                    entropy_liner = -tf.reduce_sum(self.liner_prob * tf.log(self.liner_prob + 1e-5),
+                                            axis=1, keep_dims=True)  # encourage exploration
+                    entropy_angular = -tf.reduce_sum(self.angular_prob * tf.log(self.angular_prob + 1e-5),
+                                            axis=1, keep_dims=True)  # encourage exploration
+                    self.exp_v = ENTROPY_BETA * (entropy_angular + entropy_liner) + exp_liner_v + exp_angular_v
                     self.a_loss = tf.reduce_mean(-self.exp_v)
 
                 with tf.name_scope('local_grad'):
@@ -78,16 +83,91 @@ class ACNet(object):
                     self.update_c_op = OPT_C.apply_gradients(zip(self.c_grads, globalAC.c_params))
 
     def _build_net(self, scope):
-        w_init = tf.random_normal_initializer(0., .1)
         with tf.variable_scope('actor'):
-            l_a = tf.layers.dense(self.s, 200, tf.nn.relu6, kernel_initializer=w_init, name='la')
-            a_prob = tf.layers.dense(l_a, N_A, tf.nn.softmax, kernel_initializer=w_init, name='ap')
+            with tf.variable_scope('image'):
+                # 160 160 3
+                image_a = slim.conv2d(self.image_input, 32, [3, 3], stride=2, padding='VALID', scope='conv_1')
+                # 79 79 32
+                image_a = slim.conv2d(image_a, 64, [3, 3], stride=1, padding='SAME', scope='conv_2')
+                # 79 79 64
+                image_a = slim.max_pool2d(image_a, [3, 3], stride=2, padding='VALID', scope='max_pool_1')
+                # 39 39 64
+                image_a = slim.conv2d(image_a, 80, [3, 3], stride=2, padding='VALID', scope='conv_3')
+                # 19 19 80
+                image_a = slim.conv2d(image_a, 192,[3, 3], stride=1, padding='VALID', scope='conv_4')
+                # 19 19 192
+                image_a = slim.max_pool2d(image_a, [3, 3], stride=2, padding='VALID', scope='max_pool_2' )
+                # 9 9 192
+                image_a = slim.conv2d(image_a, 192,[3, 3], stride=1, padding='SAME',scope='conv_5')
+                # 9 9 192
+            with tf.variable_scope('state'):
+                state_a = slim.fully_connected(self.state_input, 192, activation_fn=tf.nn.relu, scope='state_fc') 
+                state_a = tf.reshape(state_a, [-1, 1, 1, 192])
+                state_a = tf.tile(state_a, [1, 9, 9, 1])
+            with tf.variable_scope('connect'):
+                # 9 9 192
+                net = tf.add(image_a, state_a)
+            with tf.variable_scope('feature'):
+                net = slim.conv2d(net, 192, [1, 1], stride=1, padding='VALID', scope='conv_6')
+                # 9 9 192
+                net = slim.conv2d(net, 192, [3, 3], stride=1, padding='VALID', scope='conv_7')
+                # 7 7 256
+                net = slim.conv2d(net, 256, [1, 1], stride=1, padding='VALID', scope='conv_7')
+                # 7 7 256
+                net = slim.conv2d(net, 256, [3, 3], stride=1, padding='VALID',scope='conv_8')
+                # 5 5 256
+                net = slim.flatten(net, scope='flatten')
+                net = slim.dropout(net, 0.8, scope='dropout')
+            with tf.variable_scope('liner_out'):
+                liner_a = slim.fully_connected(net, num_outputs=512, activation_fn=tf.nn.relu, scope='liner_fc_1')
+                liner_a = slim.fully_connected(liner_a, num_outputs=n_liner, activation_fn=None, scope='liner_fc_2')
+                liner_prob = tf.nn.softmax(liner_a, name='liner')
+            with tf.variable_scope('angular_out'):
+                angular_a = slim.fully_connected(net, num_outputs=512, activation_fn=tf.nn.relu, scope='angular_fc_1')
+                angular_a = slim.fully_connected(angular_a, num_outputs=n_angular, activation_fn=None, scope='angular_fc_2')
+                angular_prob = tf.nn.softmax(angular_a,name='angular')
         with tf.variable_scope('critic'):
-            l_c = tf.layers.dense(self.s, 100, tf.nn.relu6, kernel_initializer=w_init, name='lc')
-            v = tf.layers.dense(l_c, 1, kernel_initializer=w_init, name='v')  # state value
+            with tf.variable_scope('image'):
+                # 160 160 3
+                image_c = slim.conv2d(self.image_input, 32, [3, 3], stride=2, padding='VALID', scope='conv_1')
+                # 79 79 32
+                image_c = slim.conv2d(image_c, 64, [3, 3], stride=1, padding='SAME', scope='conv_2')
+                # 79 79 64
+                image_c = slim.max_pool2d(image_c, [3, 3], stride=2, padding='VALID', scope='max_pool_1')
+                # 39 39 64
+                image_c = slim.conv2d(image_c, 80, [3, 3], stride=2, padding='VALID', scope='conv_3')
+                # 19 19 80
+                image_c = slim.conv2d(image_c, 192,[3, 3], stride=1, padding='VALID', scope='conv_4')
+                # 19 19 192
+                image_c = slim.max_pool2d(image_c, [3, 3], stride=2, padding='VALID', scope='max_pool_2' )
+                # 9 9 192
+                image_c = slim.conv2d(image_c, 192,[3, 3], stride=1, padding='SAME',scope='conv_5')
+                # 9 9 192
+            with tf.variable_scope('state'):
+                state_c = slim.fully_connected(self.state_input, 192, activation_fn=tf.nn.relu, scope='state_fc') 
+                state_c = tf.reshape(state_c, [-1, 1, 1, 192])
+                state_c = tf.tile(state_c, [1, 9, 9, 1])
+            with tf.variable_scope('connect'):
+                # 9 9 192
+                net = tf.add(image_c, state_c)
+            with tf.variable_scope('feature'):
+                net = slim.conv2d(net, 192, [1, 1], stride=1, padding='VALID', scope='conv_6')
+                # 9 9 192
+                net = slim.conv2d(net, 192, [3, 3], stride=1, padding='VALID', scope='conv_7')
+                # 7 7 256
+                net = slim.conv2d(net, 192, [1, 1], stride=1, padding='VALID', scope='conv_7')
+                # 7 7 256
+                net = slim.conv2d(net, 192, [3, 3], stride=1, padding='VALID',scope='conv_8')
+                # 5 5 256
+                net = slim.flatten(net, scope='flatten')
+            with tf.variable_scope('liner_v'):
+                liner_v = slim.fully_connected(net, num_outputs=1, activation_fn=None, scope='liner_c')
+            with tf.variable_scope('angular_v'):
+                angular_v = slim.fully_connected(net, num_outputs=1, activation_fn=None, scope='angular_c')
+        
         a_params = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope=scope + '/actor')
         c_params = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope=scope + '/critic')
-        return a_prob, v, a_params, c_params
+        return liner_prob, angular_prob, liner_v, angular_v, a_params, c_params
 
     def update_global(self, feed_dict):  # run by a local
         SESS.run([self.update_a_op, self.update_c_op], feed_dict)  # local grads applies to global net
@@ -98,11 +178,11 @@ class ACNet(object):
     def choose_action(self, car_state, last_action, image):  # run by a local
         '''
         选择动作：通过局部路径规划或者网络模型计算两种方式
-        
+        ---
         由于在dwa算法中，使用的信息是数据，需要使用到:
         obs,vel,goal
         state[x,y,r,liner,angular]四方面的信息，这与网络模型带入的参数不一样
-        ---
+        
         param dwa:[state,vel,goal,obs]
         param net:[state(liner,angular), image]
         '''
@@ -122,6 +202,8 @@ class Worker(object):
     def work(self):
         global GLOBAL_RUNNING_R, GLOBAL_EP
         total_step = 1
+        
+        #memory = []
         buffer_state, buffer_action, buffer_reward, buffer_image = [], [], [], []
 
         while not COORD.should_stop() and GLOBAL_EP < MAX_GLOBAL_EP:
@@ -130,13 +212,14 @@ class Worker(object):
             ep_r = 0
             while True:
                 action = self.AC.choose_action(self.agent.car_state, action, image)
-                image, reward, done = self.agent.step(action)
-                if done: r = -5
-                ep_r += r
-                buffer_state.append(s)
-                buffer_action.append(a)
-                buffer_reward.append(r)
-                buffer_image.append()
+                image, reward, is_collision, done = self.agent.step(action)
+                
+                ep_r += reward
+                #memory.append([state,action,reward,image])
+                buffer_state.append(state)
+                buffer_action.append(action)
+                buffer_reward.append(reward)
+                buffer_image.append(image)
 
                 if total_step % UPDATE_GLOBAL_ITER == 0 or done:   # update global and assign to local net
                     if done:
